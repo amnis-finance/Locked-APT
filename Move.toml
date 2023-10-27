@@ -1,0 +1,11 @@
+[package]
+name = 'LockedApt'
+version = '1.0.0'
+upgrade_policy = "immutable"
+
+[addresses]
+locked_apt = "_"
+
+[dependencies]
+amnis = { local = "../../amnis" }
+AptosFramework = { local = "../../../framework/aptos-framework" }
