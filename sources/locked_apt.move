@@ -44,6 +44,8 @@ module locked_apt::locked_apt {
     const ESPONSOR_ACCOUNT_NOT_INITIALIZED: u64 = 4;
     /// Cannot update the withdrawal address because there are still active/unclaimed locks.
     const EACTIVE_LOCKS_EXIST: u64 = 5;
+    /// Cannot create a lock with an unlock time in the past.
+    const ELOCKUP_EXPIRED: u64 = 6;
 
     /// Represents a lock of staked APT until some specified unlock time. Afterward, the recipient can claim the coins.
     struct Lock has store {
@@ -67,9 +69,11 @@ module locked_apt::locked_apt {
     #[event]
     /// Event emitted when a lock is created.
     struct CreateLockEvent has drop, store {
+        sponsor: address,
         recipient: address,
         amount: u64,
         amount_stapt: u64,
+        unlock_time_secs: u64,
     }
 
     #[event]
@@ -151,11 +155,32 @@ module locked_apt::locked_apt {
     }
 
     #[view]
+    public fun is_sponsor(sponsor: address): bool {
+        exists<Locks>(sponsor)
+    }
+
+    #[view]
     /// Return the withdrawal address for a sponsor's locks (where canceled locks' funds are sent to).
     public fun withdrawal_address(sponsor: address): address acquires Locks {
         assert!(exists<Locks>(sponsor), ESPONSOR_ACCOUNT_NOT_INITIALIZED);
         let locks = borrow_global<Locks>(sponsor);
         locks.withdrawal_address
+    }
+
+    #[view]
+    public fun claimable_reward(sponsor: address, recipient: address): u64 acquires Locks {
+        let lock = get_lock(sponsor, recipient);
+        let current_value = math64::mul_div(
+            coin::value(&lock.coins),
+            stapt_token::stapt_price(),
+            stapt_token::precision_u64(),
+        );
+        let accumulated_rewards = current_value - lock.principal;
+        math64::mul_div(
+            accumulated_rewards,
+            stapt_token::precision_u64(),
+            stapt_token::stapt_price(),
+        )
     }
 
     /// Initialize the sponsor account to allow creating locks.
@@ -200,7 +225,13 @@ module locked_apt::locked_apt {
         sponsor: &signer, recipient: address, amount: u64, unlock_time_secs: u64) acquires Locks {
         let apt = coin::withdraw<AptosCoin>(sponsor, amount);
         let stapt = router::deposit_and_stake(apt);
-        create_lock_internal(get_locks(signer::address_of(sponsor)), stapt, recipient, unlock_time_secs);
+        create_lock_internal(
+            signer::address_of(sponsor),
+            get_locks(signer::address_of(sponsor)),
+            stapt,
+            recipient,
+            unlock_time_secs
+        );
     }
 
     public entry fun batch_create_lock_with_stapt(
@@ -213,7 +244,13 @@ module locked_apt::locked_apt {
     public entry fun create_lock_with_stapt(
         sponsor: &signer, recipient: address, amount: u64, unlock_time_secs: u64) acquires Locks {
         let stapt = coin::withdraw<StakedApt>(sponsor, amount);
-        create_lock_internal(get_locks(signer::address_of(sponsor)), stapt, recipient, unlock_time_secs);
+        create_lock_internal(
+            signer::address_of(sponsor),
+            get_locks(signer::address_of(sponsor)),
+            stapt,
+            recipient,
+            unlock_time_secs
+        );
     }
 
     /// Recipient can claim staking rewards generated as stAPT.
@@ -343,15 +380,29 @@ module locked_apt::locked_apt {
     }
 
     fun create_lock_internal(
-        locks: &mut Locks, staked_apt: Coin<StakedApt>, recipient: address, unlock_time_secs: u64) {
+        sponsor: address,
+        locks: &mut Locks,
+        staked_apt: Coin<StakedApt>,
+        recipient: address,
+        unlock_time_secs: u64
+    ) {
         assert!(!smart_table::contains(&locks.locks, recipient), ELOCK_ALREADY_EXISTS);
+        let amount_stapt = coin::value(&staked_apt);
         let principal =
-            math64::mul_div(coin::value(&staked_apt), stapt_token::stapt_price(), stapt_token::precision_u64());
+            math64::mul_div(amount_stapt, stapt_token::stapt_price(), stapt_token::precision_u64());
         smart_table::add(&mut locks.locks, recipient, Lock {
             coins: staked_apt,
             principal,
             unlock_time_secs,
         });
         locks.total_locks = locks.total_locks + 1;
+
+        event::emit(CreateLockEvent {
+            sponsor,
+            recipient,
+            amount: principal,
+            amount_stapt,
+            unlock_time_secs
+        });
     }
 }
